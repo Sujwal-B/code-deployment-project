@@ -1,0 +1,10 @@
+2023-10-27 10:00:00.000 INFO 12345 --- [main] de.zeroco.core.CmdFileServiceApplication : Starting CmdFileServiceApplication using Java 17.0.7
+2023-10-27 10:00:01.123 INFO 12345 --- [main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port(s): 8080 (http)
+2023-10-27 10:00:01.567 INFO 12345 --- [main] o.s.web.context.ContextLoader            : Root WebApplicationContext: initialization completed in 1456 ms
+2023-10-27 10:00:02.000 INFO 12345 --- [main] de.zeroco.core.CmdFileServiceApplication : Started CmdFileServiceApplication in 2.500 seconds (JVM running for 3.000)
+2023-10-27 10:05:00.000 INFO 12345 --- [http-nio-8080-exec-1] d.z.c.web.SystemController           : Sandbox directory created at: /app/cmd-file-service/sandbox
+2023-10-27 10:05:00.001 INFO 12345 --- [http-nio-8080-exec-1] d.z.c.web.SystemController           : Downloads directory created at: /app/cmd-file-service/downloads
+2023-10-27 10:05:00.002 INFO 12345 --- [http-nio-8080-exec-1] d.z.c.web.SystemController           : logs_data directory created at: /app/cmd-file-service/logs_data
+2023-10-27 10:10:00.000 WARN 12345 --- [http-nio-8080-exec-2] d.z.c.web.SystemController           : Received command: ls -la
+2023-10-27 10:10:01.000 INFO 12345 --- [http-nio-8080-exec-2] d.z.c.web.SystemController           : Command executed successfully.
+2023-10-27 10:15:00.000 ERROR 12345 --- [http-nio-8080-exec-3] d.z.c.web.SystemController           : Failed to download file from http://nonexistenturl.com/file.txt to files/nonexistent.txt. Error: java.net.UnknownHostException: nonexistenturl.com

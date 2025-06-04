@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Log Viewer</title>
+    <style>
+        :root {
+            --bg-color: #000000;
+            --text-color: #00FF00;
+            --toolbar-bg: #1a1a1a;
+            --button-bg: #333333;
+            --button-hover-bg: #444444;
+            --button-disabled-bg: #222222;
+            --button-text-color: #00FF00;
+            --error-bg: #8B0000; /* Dark red */
+            --error-text: #FFFFFF;
+            --toast-bg: #222222;
+            --toast-text: #00FF00;
+            --line-height: 1.25rem;
+            --font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+        }
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: var(--font-family);
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden; /* Prevent body scroll, log pane will scroll */
+        }
+        .toolbar {
+            position: sticky;
+            top: 0;
+            background-color: var(--toolbar-bg);
+            padding: 8px 12px;
+            display: flex;
+            gap: 10px;
+            z-index: 10;
+            border-bottom: 1px solid var(--text-color);
+            flex-wrap: wrap; /* Allow buttons to wrap on smaller screens */
+        }
+        .toolbar button {
+            background-color: var(--button-bg);
+            color: var(--button-text-color);
+            border: 1px solid var(--text-color);
+            padding: 8px 12px;
+            cursor: pointer;
+            font-family: inherit;
+            border-radius: 4px;
+        }
+        .toolbar button:hover:not(:disabled) {
+            background-color: var(--button-hover-bg);
+        }
+        .toolbar button:disabled {
+            background-color: var(--button-disabled-bg);
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+        .toolbar button:focus-visible {
+            outline: 2px solid var(--text-color);
+            outline-offset: 2px;
+        }
+        #log-pane-container {
+            flex-grow: 1;
+            overflow-y: auto; /* Allows scrolling of the log content */
+            position: relative; /* For overlay positioning */
+        }
+        #log-pane {
+            white-space: pre;
+            line-height: var(--line-height);
+            padding: 10px;
+            min-height: calc(100% - 20px); /* Ensure it takes full height for copy to work well */
+            outline: none; /* Remove default focus outline if any */
+        }
+        .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(0,0,0,0.8);
+            color: var(--text-color);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 1.5em;
+            z-index: 20; /* Above log pane */
+        }
+        .error-overlay {
+            background-color: var(--error-bg);
+            color: var(--error-text);
+            padding: 20px;
+            text-align: center;
+        }
+        .toast {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background-color: var(--toast-bg);
+            color: var(--toast-text);
+            padding: 10px 15px;
+            border-radius: 4px;
+            border: 1px solid var(--text-color);
+            opacity: 0;
+            transition: opacity 0.5s ease-in-out;
+            z-index: 30; /* Above everything */
+            max-width: 300px;
+        }
+        .toast.show {
+            opacity: 1;
+        }
+        /* Responsive: simple stack for toolbar buttons on small screens */
+        @media (max-width: 375px) {
+            .toolbar {
+                flex-direction: column;
+                align-items: stretch; /* Make buttons full width */
+            }
+            .toolbar button {
+                width: 100%;
+                margin-bottom: 5px; /* Add some space between stacked buttons */
+            }
+            .toolbar button:last-child {
+                margin-bottom: 0;
+            }
+            .toast {
+                left: 10px;
+                right: 10px;
+                bottom: 10px;
+                width: auto;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <button id="downloadButton" aria-label="Download current logs">Download Logs</button>
+        <button id="deployButton" aria-label="Execute deployment script">Deploy</button>
+        <!-- Add other controls here if needed -->
+    </div>
+
+    <div id="log-pane-container" role="region" aria-live="off" aria-atomic="true" tabindex="0">
+        <pre id="log-pane"></pre>
+        <div id="connectingOverlay" class="overlay">Connecting...</div>
+        <div id="errorOverlay" class="overlay error-overlay" style="display: none;"></div>
+    </div>
+
+    <div id="toastNotification" class="toast" role="alert" aria-live="assertive"></div>
+
+    <script>
+        const logPane = document.getElementById('log-pane');
+        const logPaneContainer = document.getElementById('log-pane-container');
+        const downloadButton = document.getElementById('downloadButton');
+        const deployButton = document.getElementById('deployButton');
+        const connectingOverlay = document.getElementById('connectingOverlay');
+        const errorOverlay = document.getElementById('errorOverlay');
+        const toastNotification = document.getElementById('toastNotification');
+
+        const API_LOGS_URL = '/api/system/logs?lines=500'; // Default: application.log
+        const API_EXECUTE_URL = '/api/system/execute';
+        const POLLING_INTERVAL = 5000; // 5 seconds
+        const SCROLL_THRESHOLD = 100; // px from bottom
+
+        let currentFetchController = null;
+        let pollingTimeoutId = null;
+        let logFileName = 'application.log'; // Default log file to view/download
+
+        function showToast(message, isError = false) {
+            toastNotification.textContent = message;
+            toastNotification.style.backgroundColor = isError ? 'var(--error-bg)' : 'var(--toast-bg)';
+            toastNotification.style.color = isError ? 'var(--error-text)' : 'var(--toast-text)';
+            toastNotification.classList.add('show');
+            setTimeout(() => {
+                toastNotification.classList.remove('show');
+            }, 3000);
+        }
+
+        function showErrorOverlay(message) {
+            errorOverlay.textContent = "Error: " + message + "\nRetrying in " + POLLING_INTERVAL/1000 + "s...";
+            errorOverlay.style.display = 'flex';
+            connectingOverlay.style.display = 'none'; // Hide connecting if error occurs
+        }
+
+        function hideErrorOverlay() {
+            errorOverlay.style.display = 'none';
+        }
+
+        function hideConnectingOverlay() {
+            if (connectingOverlay.style.display !== 'none') {
+                connectingOverlay.style.display = 'none';
+            }
+        }
+
+        async function fetchLogs() {
+            if (currentFetchController) {
+                currentFetchController.abort();
+            }
+            currentFetchController = new AbortController();
+            const signal = currentFetchController.signal;
+
+            try {
+                const response = await fetch(`${API_LOGS_URL}&file=${encodeURIComponent(logFileName)}`, { cache: 'no-store', signal });
+                hideErrorOverlay(); // Clear error on successful fetch attempt
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`Failed to fetch logs: ${response.status} ${response.statusText}. ${errorText}`);
+                }
+
+                const logs = await response.text();
+
+                const isNearBottom = logPaneContainer.scrollHeight - logPaneContainer.scrollTop - logPaneContainer.clientHeight < SCROLL_THRESHOLD;
+
+                logPane.innerText = logs; // Update content in one go
+                hideConnectingOverlay(); // Hide after first successful fetch
+
+                if (isNearBottom) {
+                    logPaneContainer.scrollTop = logPaneContainer.scrollHeight;
+                }
+
+            } catch (error) {
+                if (error.name === 'AbortError') {
+                    console.log('Fetch aborted');
+                } else {
+                    console.error('Error fetching logs:', error);
+                    showErrorOverlay(error.message);
+                    // Do not hide connecting overlay if it was the first load attempt
+                    if (logPane.innerText === '') { // First load failed
+                        connectingOverlay.style.display = 'flex'; // Keep "Connecting..." if first load fails
+                    }
+                }
+            } finally {
+                currentFetchController = null;
+                // Schedule next poll regardless of outcome, unless aborted by user action
+                if (!signal.aborted) {
+                    pollingTimeoutId = setTimeout(fetchLogs, POLLING_INTERVAL);
+                }
+            }
+        }
+
+        downloadButton.addEventListener('click', async () => {
+            try {
+                const response = await fetch(`${API_LOGS_URL}&file=${encodeURIComponent(logFileName)}`, { cache: 'no-store' });
+                if (!response.ok) {
+                    throw new Error(`Failed to download logs: ${response.status} ${response.statusText}`);
+                }
+                const logsText = await response.text();
+                const blob = new Blob([logsText], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `server-logs-${logFileName.replace(/[^a-z0-9_.-]/ig, '_')}.txt`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                showToast('Logs downloaded successfully.');
+            } catch (error) {
+                console.error('Error downloading logs:', error);
+                showToast('Error downloading logs: ' + error.message, true);
+            }
+        });
+
+        deployButton.addEventListener('click', async () => {
+            if (!confirm('Are you sure you want to execute the deployment script?')) {
+                return;
+            }
+            deployButton.disabled = true;
+            deployButton.textContent = 'Deploying...';
+            try {
+                const response = await fetch(API_EXECUTE_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ command: './deploy.sh' })
+                });
+                const resultText = await response.text();
+                if (!response.ok) {
+                    throw new Error(`Deploy command failed: ${response.status} ${response.statusText}\n${resultText}`);
+                }
+                showToast('Deploy command executed successfully.\nOutput:\n' + resultText);
+            } catch (error) {
+                console.error('Error executing deploy command:', error);
+                showToast('Error executing deploy command: ' + error.message, true);
+            } finally {
+                deployButton.disabled = false;
+                deployButton.textContent = 'Deploy';
+            }
+        });
+
+        logPane.addEventListener('dblclick', () => {
+            const selection = window.getSelection();
+            const range = document.createRange();
+            // Heuristic: Select the line under the cursor.
+            // This is a simplified version. More robust line selection might involve
+            // finding the nearest newline characters around the selection.
+            if (selection.rangeCount > 0) {
+                const clickedRange = selection.getRangeAt(0);
+                const node = clickedRange.startContainer;
+                if (node.nodeType === Node.TEXT_NODE) {
+                    const textContent = node.textContent;
+                    let start = clickedRange.startOffset;
+                    let end = clickedRange.endOffset;
+
+                    // If nothing is selected (just a double click), expand to the line
+                    if (start === end) {
+                        while(start > 0 && textContent[start-1] !== '\n') {
+                            start--;
+                        }
+                        while(end < textContent.length && textContent[end] !== '\n') {
+                            end++;
+                        }
+                    }
+
+                    range.setStart(node, start);
+                    range.setEnd(node, end);
+
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+
+                    try {
+                        navigator.clipboard.writeText(selection.toString())
+                            .then(() => showToast('Copied to clipboard.'))
+                            .catch(err => {
+                                console.error('Failed to copy text: ', err);
+                                showToast('Failed to copy text.', true);
+                            });
+                    } catch (err) {
+                         console.error('Clipboard API not available or failed: ', err);
+                         showToast('Clipboard API not available.', true);
+                    }
+                }
+            }
+        });
+
+        // Initial fetch
+        fetchLogs();
+
+        // Focus management for accessibility
+        // Tab order: Download -> Deploy -> Log Pane
+        // Log pane is focusable to allow keyboard scrolling after tabbing to it.
+        // Buttons have focus-visible by default.
+    </script>
+</body>
+</html>
